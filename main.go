@@ -14,6 +14,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 type NotificationRequest struct {
@@ -26,12 +29,6 @@ type CachedMessage struct {
 	Name    string `json:"name"`
 	Email   string `json:"email"`
 	Message string `json:"message"`
-}
-
-type Token struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	Expiry       string `json:"expiry"` // Время истечения токена
 }
 
 var (
@@ -51,7 +48,7 @@ func init() {
 	oauthConfig = &oauth2.Config{
 		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-		RedirectURL:  "http://localhost:8080/callback",
+		RedirectURL:  "https://solarezz.dev/callback", // Используйте production-URL
 		Scopes:       []string{gmail.GmailSendScope},
 		Endpoint:     google.Endpoint,
 	}
@@ -190,7 +187,15 @@ func loadTokenFromFile(file string) (*oauth2.Token, error) {
 
 	token := &oauth2.Token{}
 	err = json.NewDecoder(f).Decode(token)
-	return token, err
+	if err != nil {
+		return nil, fmt.Errorf("ошибка декодирования токена: %v", err)
+	}
+
+	if token.AccessToken == "" {
+		return nil, fmt.Errorf("токен пуст")
+	}
+
+	return token, nil
 }
 
 func saveTokenToFile(file string, token *oauth2.Token) error {
@@ -307,21 +312,45 @@ func notificationHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Настраиваем CORS
+	mux := http.NewServeMux()
+	mux.HandleFunc("/send-notification", notificationHandler)
+	mux.HandleFunc("/callback", callbackHandler)
+
 	c := cors.New(cors.Options{
-		AllowedOrigins:   []string{"https://solarezz.dev", "http://localhost:8080", "https://www.solarezz.dev", "http://localhost:8000", "http://127.0.0.1:8000"}, // Укажи домены, с которых разрешены запросы
-		AllowedMethods:   []string{"POST", "GET", "OPTIONS"},                                                                                                      // Разрешенные HTTP-методы
-		AllowedHeaders:   []string{"Content-Type"},                                                                                                                // Разрешенные заголовки
-		AllowCredentials: true,                                                                                                                                    // Разрешить передачу куки и авторизационных данных
-		Debug:            true,                                                                                                                                    // Включить логирование CORS (опционально)
+		AllowedOrigins:   []string{"https://solarezz.dev", "https://www.solarezz.dev"},
+		AllowedMethods:   []string{"POST", "GET", "OPTIONS"},
+		AllowedHeaders:   []string{"Content-Type"},
+		AllowCredentials: true,
+		Debug:            true,
 	})
 
-	// Оборачиваем маршруты в CORS
-	handler := c.Handler(http.DefaultServeMux)
+	handler := c.Handler(mux)
 
-	http.HandleFunc("/send-notification", notificationHandler)
-	http.HandleFunc("/callback", callbackHandler)
+	server := &http.Server{
+		Addr:    "0.0.0.0:8080",
+		Handler: handler,
+	}
 
-	fmt.Println("Сервер запущен на http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", handler))
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Ошибка запуска сервера: %v", err)
+		}
+	}()
+
+	log.Println("Сервер запущен на http://0.0.0.0:8080")
+
+	<-done
+	log.Println("Сервер завершает работу...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("Ошибка завершения работы сервера: %v", err)
+	}
+
+	log.Println("Сервер остановлен.")
 }

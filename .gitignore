@@ -1,3 +1,4 @@
 .env
 auth_code.txt
 token.json
+.idea
